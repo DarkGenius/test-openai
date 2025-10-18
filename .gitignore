@@ -1,0 +1,23 @@
+# Environment files with API keys
+*.env
+# Except example.env (template)
+!example.env
+
+# Log files
+openai-test-*.json
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
