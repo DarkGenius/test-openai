@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # Default values
-MODEL="${OPENAI_MODEL:-gpt-5}"
-# MODEL="openai/gpt-oss-120b"
-BASE_URL="${OPENAI_BASE_URL:-https://agentrouter.org/v1}"
-# BASE_URL="${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}"
+MODEL="${OPENAI_MODEL:-openai/gpt-oss-120b}"
+BASE_URL="${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}"
 MESSAGE="Объясни что такое нейронная сеть простыми словами"
 API_TYPE="both"  # Options: chat, responses, both
 MAX_TOKENS="${OPENAI_API_MAX_TOKENS:-1000}"
 SAVE_LOG=false
+CUSTOM_HEADERS=""
+CUSTOM_HEADERS_FILE=""
+declare -a CUSTOM_HEADERS_CLI=()
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -37,16 +38,30 @@ while [[ $# -gt 0 ]]; do
             SAVE_LOG=true
             shift
             ;;
+        --add-headers)
+            CUSTOM_HEADERS_CLI+=("$2")
+            shift 2
+            ;;
+        --add-headers-file)
+            CUSTOM_HEADERS_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--save-log]"
+            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--save-log] [--add-headers HEADERS] [--add-headers-file FILE]"
             echo ""
             echo "Options:"
-            echo "  --model      Model to use (default: gpt-5 or \$OPENAI_MODEL)"
-            echo "  --url        Base URL for API (default: \$OPENAI_BASE_URL or https://agentrouter.org/v1)"
-            echo "  --message    Test message to send (default: 'Объясни что такое нейронная сеть простыми словами')"
-            echo "  --type       API type to test: chat, responses, both (default: both)"
-            echo "  --max-tokens Maximum tokens to generate (default: 1000 or \$OPENAI_API_MAX_TOKENS)"
-            echo "  --save-log   Save request and response to JSON log file (default: false)"
+            echo "  --model             Model to use (default: gpt-5 or \$OPENAI_MODEL)"
+            echo "  --url               Base URL for API (default: \$OPENAI_BASE_URL or https://agentrouter.org/v1)"
+            echo "  --message           Test message to send (default: 'Объясни что такое нейронная сеть простыми словами')"
+            echo "  --type              API type to test: chat, responses, both (default: both)"
+            echo "  --max-tokens        Maximum tokens to generate (default: 1000 or \$OPENAI_API_MAX_TOKENS)"
+            echo "  --save-log          Save request and response to JSON log file (default: false)"
+            echo "  --add-headers       Add custom HTTP headers (can be used multiple times)"
+            echo "                      Multiple headers in one value: use || as separator"
+            echo "                      Example: --add-headers 'X-Custom: value1 || X-Test: value2'"
+            echo "                      Example: --add-headers 'X-Custom: value1' --add-headers 'X-Test: value2'"
+            echo "  --add-headers-file  Read custom HTTP headers from file (one header per line, # for comments)"
+            echo "                      Example: --add-headers-file headers.txt"
             echo ""
             echo "Environment variables:"
             echo "  OPENAI_API_KEY        API key for authentication (required)"
@@ -66,6 +81,9 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  ./test-openai.sh --type chat"
             echo "  ./test-openai.sh --model gpt-4 --message 'Hello world'"
+            echo "  ./test-openai.sh --add-headers 'X-Custom: value1 || X-Test: value2'"
+            echo "  ./test-openai.sh --add-headers 'User-Agent: MyApp/1.0' --add-headers 'X-Request-ID: 123'"
+            echo "  ./test-openai.sh --add-headers-file headers.txt --save-log"
             echo "  export OPENAI_MODEL='openai/gpt-oss-20b:free' && ./test_openai.sh"
             exit 0
             ;;
@@ -91,12 +109,81 @@ BASE_URL=$(echo "$BASE_URL" | tr -d '\r' | tr -d '"' | xargs)
 MESSAGE=$(echo "$MESSAGE" | tr -d '\r' | xargs)
 OPENAI_API_KEY=$(echo "$OPENAI_API_KEY" | tr -d '\r' | tr -d '"' | xargs)
 
+# Process custom headers
+CURL_CUSTOM_HEADERS=""
+declare -a CUSTOM_HEADERS_ARRAY=()
+
+# Read headers from file if specified
+if [[ -n "$CUSTOM_HEADERS_FILE" ]]; then
+    if [[ -f "$CUSTOM_HEADERS_FILE" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and comments, remove carriage returns
+            line=$(echo "$line" | tr -d '\r' | xargs)
+            if [[ -n "$line" && ! "$line" =~ ^# ]]; then
+                CURL_CUSTOM_HEADERS="$CURL_CUSTOM_HEADERS -H \"$line\""
+                CUSTOM_HEADERS_ARRAY+=("$line")
+            fi
+        done < "$CUSTOM_HEADERS_FILE"
+    else
+        echo "Error: Headers file not found: $CUSTOM_HEADERS_FILE"
+        exit 1
+    fi
+fi
+
+# Parse headers from command line if specified
+if [[ ${#CUSTOM_HEADERS_CLI[@]} -gt 0 ]]; then
+    for headers_value in "${CUSTOM_HEADERS_CLI[@]}"; do
+        # Check if this value contains || separator
+        if [[ "$headers_value" == *"||"* ]]; then
+            # Split by || separator
+            remaining="$headers_value"
+            while [[ -n "$remaining" ]]; do
+                # Extract header before first ||
+                if [[ "$remaining" == *"||"* ]]; then
+                    header="${remaining%%||*}"
+                    remaining="${remaining#*||}"
+                else
+                    header="$remaining"
+                    remaining=""
+                fi
+                
+                # Trim leading/trailing whitespace
+                header="${header#"${header%%[![:space:]]*}"}"
+                header="${header%"${header##*[![:space:]]}"}"
+                
+                if [[ -n "$header" ]]; then
+                    CURL_CUSTOM_HEADERS="$CURL_CUSTOM_HEADERS -H \"$header\""
+                    CUSTOM_HEADERS_ARRAY+=("$header")
+                fi
+            done
+        else
+            # Single header without separator
+            header="$headers_value"
+            
+            # Trim leading/trailing whitespace
+            header="${header#"${header%%[![:space:]]*}"}"
+            header="${header%"${header##*[![:space:]]}"}"
+            
+            if [[ -n "$header" ]]; then
+                CURL_CUSTOM_HEADERS="$CURL_CUSTOM_HEADERS -H \"$header\""
+                CUSTOM_HEADERS_ARRAY+=("$header")
+            fi
+        fi
+    done
+fi
+
 echo "Testing OpenAI API:"
 echo "  Model: $MODEL"
 echo "  Base URL: $BASE_URL"
 echo "  Message: $MESSAGE"
 echo "  API Type: $API_TYPE"
 echo "  Max Tokens: $MAX_TOKENS"
+if [[ ${#CUSTOM_HEADERS_ARRAY[@]} -gt 0 ]]; then
+    echo "  Custom Headers:"
+    for header in "${CUSTOM_HEADERS_ARRAY[@]}"; do
+        echo "  $header"
+    done
+fi
 if [[ "$SAVE_LOG" == "true" ]]; then
     LOG_FILE="openai-test-$(date +%Y%m%d-%H%M%S).json"
     echo "  Log file: $LOG_FILE"
@@ -116,9 +203,9 @@ RESPONSES_RESPONSE=""
 
 RESPONSES_API_TYPE="none"
 
-if [[ "$BASE_URL" == *"openrouter.ai"* ]]; then
+if [[ "$BASE_URL" == *"openrouter.ai"*  ]]; then
     RESPONSES_API_TYPE="openrouter"
-elif [[ "$BASE_URL" == *"api.openai.com"* || "$BASE_URL" == *"openai.azure.com"* ]]; then
+elif [[ "$BASE_URL" == *"api.openai.com"* || "$BASE_URL" == *"openai.azure.com"* || "$BASE_URL" == *"agentrouter.org"* ]]; then
     RESPONSES_API_TYPE="openai"
 fi
 
@@ -159,20 +246,33 @@ test_chat_completions() {
         CHAT_REQUEST="$request_body"
     fi
     
-    response=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -H "HTTP-Referer: https://github.com/test" \
-        -H "X-Title: OpenAI Test Script" \
-        -d "$request_body" \
-        "$BASE_URL/chat/completions" 2>&1)
+    # Build curl command with custom headers
+    curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\""
+    curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
+    curl_cmd="$curl_cmd -H \"Authorization: Bearer $OPENAI_API_KEY\""
+    curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
+    curl_cmd="$curl_cmd -d \$'$request_body'"
+    curl_cmd="$curl_cmd \"$BASE_URL/chat/completions\""
+    
+    response=$(eval $curl_cmd 2>&1)
     
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
     
     # Save response if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
-        CHAT_RESPONSE="$response_body"
+        # Minify JSON to single line to avoid line breaks in log file
+        if command -v jq &> /dev/null; then
+            # Use jq to compact JSON (removes all unnecessary whitespace)
+            CHAT_RESPONSE=$(printf '%s' "$response_body" | jq -c . 2>/dev/null)
+            if [[ $? -ne 0 || -z "$CHAT_RESPONSE" ]]; then
+                # Fallback if jq fails: manually remove newlines
+                CHAT_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
+            fi
+        else
+            # Fallback: manually remove newlines and carriage returns
+            CHAT_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
+        fi
     fi
     
     echo "HTTP Status: $http_status"
@@ -255,20 +355,33 @@ test_openrouter_responses_api() {
         RESPONSES_REQUEST="$request_body"
     fi
     
-    response=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -H "HTTP-Referer: https://github.com/test" \
-        -H "X-Title: OpenAI Test Script" \
-        -d "$request_body" \
-        "$BASE_URL/responses" 2>&1)
+    # Build curl command with custom headers
+    curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\""
+    curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
+    curl_cmd="$curl_cmd -H \"Authorization: Bearer $OPENAI_API_KEY\""
+    curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
+    curl_cmd="$curl_cmd -d \$'$request_body'"
+    curl_cmd="$curl_cmd \"$BASE_URL/responses\""
+    
+    response=$(eval $curl_cmd 2>&1)
     
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
     
     # Save response if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
-        RESPONSES_RESPONSE="$response_body"
+        # Minify JSON to single line to avoid line breaks in log file
+        if command -v jq &> /dev/null; then
+            # Use jq to compact JSON (removes all unnecessary whitespace)
+            RESPONSES_RESPONSE=$(printf '%s' "$response_body" | jq -c . 2>/dev/null)
+            if [[ $? -ne 0 || -z "$RESPONSES_RESPONSE" ]]; then
+                # Fallback if jq fails: manually remove newlines
+                RESPONSES_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
+            fi
+        else
+            # Fallback: manually remove newlines and carriage returns
+            RESPONSES_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
+        fi
     fi
     
     echo "HTTP Status: $http_status"
@@ -354,16 +467,23 @@ test_openai_responses_api() {
     
     # Step 1: Create a session
     echo "Step 1: Creating session..."
-    session_response=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -H "HTTP-Referer: https://github.com/test" \
-        -H "X-Title: OpenAI Test Script" \
-        -d "{
-            \"model\": \"$MODEL\",
-            \"voice\": \"alloy\"
-        }" \
-        "$BASE_URL/sessions" 2>&1)
+    
+    session_request="{
+        \"model\": \"$MODEL\",
+        \"voice\": \"alloy\"
+    }"
+    
+    # Build curl command with custom headers
+    curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\""
+    curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
+    curl_cmd="$curl_cmd -H \"Authorization: Bearer $OPENAI_API_KEY\""
+    curl_cmd="$curl_cmd -H \"HTTP-Referer: https://github.com/test\""
+    curl_cmd="$curl_cmd -H \"X-Title: OpenAI Test Script\""
+    curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
+    curl_cmd="$curl_cmd -d \$'$session_request'"
+    curl_cmd="$curl_cmd \"$BASE_URL/sessions\""
+    
+    session_response=$(eval $curl_cmd 2>&1)
     
     session_http_status=$(echo "$session_response" | grep "HTTP_STATUS:" | cut -d: -f2)
     session_body=$(echo "$session_response" | sed '/HTTP_STATUS:/d')
@@ -402,28 +522,35 @@ test_openai_responses_api() {
     
     # Step 2: Create a response
     echo "Step 2: Creating response..."
-    response=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -H "HTTP-Referer: https://github.com/test" \
-        -H "X-Title: OpenAI Test Script" \
-        -d "{
-            \"modalities\": [\"text\"],
-            \"instructions\": \"You are a helpful assistant.\",
-            \"input\": [
-                {
-                    \"type\": \"message\",
-                    \"role\": \"user\",
-                    \"content\": [
-                        {
-                            \"type\": \"input_text\",
-                            \"text\": \"$MESSAGE\"
-                        }
-                    ]
-                }
-            ]
-        }" \
-        "$BASE_URL/sessions/$SESSION_ID/responses" 2>&1)
+    
+    response_request="{
+        \"modalities\": [\"text\"],
+        \"instructions\": \"You are a helpful assistant.\",
+        \"input\": [
+            {
+                \"type\": \"message\",
+                \"role\": \"user\",
+                \"content\": [
+                    {
+                        \"type\": \"input_text\",
+                        \"text\": \"$MESSAGE\"
+                    }
+                ]
+            }
+        ]
+    }"
+    
+    # Build curl command with custom headers
+    curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\""
+    curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
+    curl_cmd="$curl_cmd -H \"Authorization: Bearer $OPENAI_API_KEY\""
+    curl_cmd="$curl_cmd -H \"HTTP-Referer: https://github.com/DarkGenius/test-openai\""
+    curl_cmd="$curl_cmd -H \"X-Title: OpenAI Test Script\""
+    curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
+    curl_cmd="$curl_cmd -d \$'$response_request'"
+    curl_cmd="$curl_cmd \"$BASE_URL/sessions/$SESSION_ID/responses\""
+    
+    response=$(eval $curl_cmd 2>&1)
     
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
@@ -506,8 +633,61 @@ if [[ "$SAVE_LOG" == "true" ]]; then
     echo "💾 Saving log to $LOG_FILE"
     echo "═══════════════════════════════════════"
     
-    # Build JSON structure
-    log_json="{"
+    # Build custom headers array for JSON
+    CUSTOM_HEADERS_JSON="[]"
+    if [[ ${#CUSTOM_HEADERS_ARRAY[@]} -gt 0 ]]; then
+        # Use jq to properly escape headers if available, otherwise manual escape
+        if command -v jq &> /dev/null; then
+            # Use jq for proper JSON encoding
+            CUSTOM_HEADERS_JSON="["
+            first_header=true
+            for header in "${CUSTOM_HEADERS_ARRAY[@]}"; do
+                if [[ "$first_header" == "true" ]]; then
+                    first_header=false
+                else
+                    CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON,"
+                fi
+                # Use jq to properly escape the string
+                header_escaped=$(printf '%s' "$header" | jq -R .)
+                CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON\n    $header_escaped"
+            done
+            CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON\n  ]"
+        else
+            # Fallback: manual escaping
+            CUSTOM_HEADERS_JSON="["
+            first_header=true
+            for header in "${CUSTOM_HEADERS_ARRAY[@]}"; do
+                if [[ "$first_header" == "true" ]]; then
+                    first_header=false
+                else
+                    CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON,"
+                fi
+                # Manual escape: backslash, quote, and control chars
+                header_escaped=$(printf '%s' "$header" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON\n    \"$header_escaped\""
+            done
+            CUSTOM_HEADERS_JSON="$CUSTOM_HEADERS_JSON\n  ]"
+        fi
+    fi
+    
+    # Build JSON structure with metadata
+    # Escape message for JSON (replace " with \" and newlines with \n)
+    MESSAGE_ESCAPED=$(echo "$MESSAGE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+    
+    log_json="{
+  \"metadata\": {
+    \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
+    \"model\": \"$MODEL\",
+    \"base_url\": \"$BASE_URL\",
+    \"max_tokens\": $MAX_TOKENS,
+    \"message\": \"$MESSAGE_ESCAPED\",
+    \"custom_headers\": $CUSTOM_HEADERS_JSON
+  }"
+    
+    # Add comma if any API was executed
+    if [[ -n "$CHAT_REQUEST" || -n "$RESPONSES_REQUEST" ]]; then
+        log_json="$log_json,"
+    fi
     
     # Add chat_completions_api if it was executed
     if [[ -n "$CHAT_REQUEST" ]]; then
@@ -536,7 +716,8 @@ if [[ "$SAVE_LOG" == "true" ]]; then
 }"
     
     # Save to file with pretty formatting
-    echo "$log_json" | jq . > "$LOG_FILE" 2>/dev/null || echo "$log_json" > "$LOG_FILE"
+    # Use echo -e to properly interpret \n in custom_headers
+    echo -e "$log_json" | jq . > "$LOG_FILE" 2>/dev/null || echo -e "$log_json" > "$LOG_FILE"
     
     if [[ $? -eq 0 ]]; then
         echo "✅ Log saved successfully to: $LOG_FILE"
