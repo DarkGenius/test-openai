@@ -6,6 +6,7 @@ BASE_URL="${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}"
 MESSAGE="Объясни что такое нейронная сеть простыми словами"
 API_TYPE="both"  # Options: chat, responses, both
 MAX_TOKENS="${OPENAI_API_MAX_TOKENS:-1000}"
+RESPONSES_API_TYPE_OVERRIDE="${RESPONSES_API_TYPE:-}"  # Options: openai, openrouter, or empty for auto-detect
 SAVE_LOG=false
 CUSTOM_HEADERS=""
 CUSTOM_HEADERS_FILE=""
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             MAX_TOKENS="$2"
             shift 2
             ;;
+        --responses-api-type)
+            RESPONSES_API_TYPE_OVERRIDE="$2"
+            shift 2
+            ;;
         --save-log)
             SAVE_LOG=true
             shift
@@ -47,7 +52,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--save-log] [--add-headers HEADERS] [--add-headers-file FILE]"
+            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--responses-api-type TYPE] [--save-log] [--add-headers HEADERS] [--add-headers-file FILE]"
             echo ""
             echo "Options:"
             echo "  --model             Model to use (default: gpt-5 or \$OPENAI_MODEL)"
@@ -55,6 +60,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --message           Test message to send (default: 'Объясни что такое нейронная сеть простыми словами')"
             echo "  --type              API type to test: chat, responses, both (default: both)"
             echo "  --max-tokens        Maximum tokens to generate (default: 1000 or \$OPENAI_API_MAX_TOKENS)"
+            echo "                      Use -1 to omit max_tokens from request body"
+            echo "  --responses-api-type Override Responses API type: openai, openrouter (default: auto-detect)"
+            echo "                      Use this to force a specific Responses API format for custom endpoints"
             echo "  --save-log          Save request and response to JSON log file (default: false)"
             echo "  --add-headers       Add custom HTTP headers (can be used multiple times)"
             echo "                      Multiple headers in one value: use || as separator"
@@ -68,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo "  OPENAI_BASE_URL       Base URL for API"
             echo "  OPENAI_MODEL          Model to use (default: gpt-5)"
             echo "  OPENAI_API_MAX_TOKENS Maximum tokens to generate (default: 1000)"
+            echo "  RESPONSES_API_TYPE    Override Responses API type: openai, openrouter"
             echo ""
             echo "Supported APIs:"
             echo "  Chat Completions API (/chat/completions):"
@@ -84,7 +93,9 @@ while [[ $# -gt 0 ]]; do
             echo "  ./test-openai.sh --add-headers 'X-Custom: value1 || X-Test: value2'"
             echo "  ./test-openai.sh --add-headers 'User-Agent: MyApp/1.0' --add-headers 'X-Request-ID: 123'"
             echo "  ./test-openai.sh --add-headers-file headers.txt --save-log"
+            echo "  ./test-openai.sh --responses-api-type openrouter --url https://custom-api.example.com/v1"
             echo "  export OPENAI_MODEL='openai/gpt-oss-20b:free' && ./test_openai.sh"
+            echo "  export RESPONSES_API_TYPE='openai' && ./test_openai.sh --url https://custom-api.example.com/v1"
             exit 0
             ;;
         *)
@@ -98,6 +109,15 @@ done
 if [[ -z "$OPENAI_API_KEY" ]]; then
     echo "Error: OPENAI_API_KEY environment variable is not set"
     exit 1
+fi
+
+# Validate responses-api-type if provided
+if [[ -n "$RESPONSES_API_TYPE_OVERRIDE" ]]; then
+    if [[ "$RESPONSES_API_TYPE_OVERRIDE" != "openai" && "$RESPONSES_API_TYPE_OVERRIDE" != "openrouter" ]]; then
+        echo "Error: Invalid --responses-api-type value: $RESPONSES_API_TYPE_OVERRIDE"
+        echo "Valid values: openai, openrouter"
+        exit 1
+    fi
 fi
 
 # Remove trailing slash from BASE_URL if present
@@ -178,10 +198,13 @@ echo "  Base URL: $BASE_URL"
 echo "  Message: $MESSAGE"
 echo "  API Type: $API_TYPE"
 echo "  Max Tokens: $MAX_TOKENS"
+if [[ -n "$RESPONSES_API_TYPE_OVERRIDE" ]]; then
+    echo "  Responses API Type: $RESPONSES_API_TYPE_OVERRIDE (overridden)"
+fi
 if [[ ${#CUSTOM_HEADERS_ARRAY[@]} -gt 0 ]]; then
     echo "  Custom Headers:"
     for header in "${CUSTOM_HEADERS_ARRAY[@]}"; do
-        echo "  $header"
+        echo "    $header"
     done
 fi
 if [[ "$SAVE_LOG" == "true" ]]; then
@@ -203,10 +226,16 @@ RESPONSES_RESPONSE=""
 
 RESPONSES_API_TYPE="none"
 
-if [[ "$BASE_URL" == *"openrouter.ai"*  ]]; then
-    RESPONSES_API_TYPE="openrouter"
-elif [[ "$BASE_URL" == *"api.openai.com"* || "$BASE_URL" == *"openai.azure.com"* || "$BASE_URL" == *"agentrouter.org"* ]]; then
-    RESPONSES_API_TYPE="openai"
+# If user provided an override via CLI or env var, use it
+if [[ -n "$RESPONSES_API_TYPE_OVERRIDE" ]]; then
+    RESPONSES_API_TYPE="$RESPONSES_API_TYPE_OVERRIDE"
+else
+    # Auto-detect based on BASE_URL
+    if [[ "$BASE_URL" == *"openrouter.ai"*  ]]; then
+        RESPONSES_API_TYPE="openrouter"
+    elif [[ "$BASE_URL" == *"api.openai.com"* || "$BASE_URL" == *"openai.azure.com"* || "$BASE_URL" == *"agentrouter.org"* ]]; then
+        RESPONSES_API_TYPE="openai"
+    fi
 fi
 
 # Warn if Responses API is not supported
@@ -230,7 +259,19 @@ test_chat_completions() {
     echo "═══════════════════════════════════════"
     
     # Prepare request body
-    request_body="{
+    if [[ "$MAX_TOKENS" == "-1" ]]; then
+        # Don't include max_tokens if it's -1
+        request_body="{
+        \"model\": \"$MODEL\",
+        \"messages\": [
+            {
+                \"role\": \"user\",
+                \"content\": \"$MESSAGE\"
+            }
+        ]
+    }"
+    else
+        request_body="{
         \"model\": \"$MODEL\",
         \"messages\": [
             {
@@ -240,6 +281,7 @@ test_chat_completions() {
         ],
         \"max_tokens\": $MAX_TOKENS
     }"
+    fi
     
     # Save request if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
@@ -674,12 +716,27 @@ if [[ "$SAVE_LOG" == "true" ]]; then
     # Escape message for JSON (replace " with \" and newlines with \n)
     MESSAGE_ESCAPED=$(echo "$MESSAGE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
     
+    # Handle max_tokens for JSON (use null for -1)
+    if [[ "$MAX_TOKENS" == "-1" ]]; then
+        MAX_TOKENS_JSON="null"
+    else
+        MAX_TOKENS_JSON="$MAX_TOKENS"
+    fi
+
+    # Handle responses_api_type for JSON
+    if [[ -n "$RESPONSES_API_TYPE_OVERRIDE" ]]; then
+        RESPONSES_API_TYPE_JSON="\"$RESPONSES_API_TYPE_OVERRIDE\""
+    else
+        RESPONSES_API_TYPE_JSON="\"auto-detect\""
+    fi
+
     log_json="{
   \"metadata\": {
     \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\",
     \"model\": \"$MODEL\",
     \"base_url\": \"$BASE_URL\",
-    \"max_tokens\": $MAX_TOKENS,
+    \"max_tokens\": $MAX_TOKENS_JSON,
+    \"responses_api_type\": $RESPONSES_API_TYPE_JSON,
     \"message\": \"$MESSAGE_ESCAPED\",
     \"custom_headers\": $CUSTOM_HEADERS_JSON
   }"
