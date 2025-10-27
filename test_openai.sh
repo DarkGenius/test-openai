@@ -7,6 +7,7 @@ MESSAGE="Объясни что такое нейронная сеть прост
 API_TYPE="both"  # Options: chat, responses, both
 MAX_TOKENS="${OPENAI_API_MAX_TOKENS:-1000}"
 RESPONSES_API_TYPE_OVERRIDE="${RESPONSES_API_TYPE:-}"  # Options: openai, openrouter, or empty for auto-detect
+STREAMING="${OPENAI_API_STREAMING:-false}"  # Enable streaming mode for chat completions
 SAVE_LOG=false
 CUSTOM_HEADERS=""
 CUSTOM_HEADERS_FILE=""
@@ -23,7 +24,7 @@ while [[ $# -gt 0 ]]; do
             BASE_URL="$2"
             shift 2
             ;;
-        --message)
+        -m|--message)
             MESSAGE="$2"
             shift 2
             ;;
@@ -51,18 +52,23 @@ while [[ $# -gt 0 ]]; do
             CUSTOM_HEADERS_FILE="$2"
             shift 2
             ;;
+        --streaming)
+            STREAMING=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--responses-api-type TYPE] [--save-log] [--add-headers HEADERS] [--add-headers-file FILE]"
+            echo "Usage: $0 [--model MODEL] [--url BASE_URL] [-m|--message MESSAGE] [--type API_TYPE] [--max-tokens N] [--responses-api-type TYPE] [--streaming] [--save-log] [--add-headers HEADERS] [--add-headers-file FILE]"
             echo ""
             echo "Options:"
             echo "  --model             Model to use (default: gpt-5 or \$OPENAI_MODEL)"
             echo "  --url               Base URL for API (default: \$OPENAI_BASE_URL or https://agentrouter.org/v1)"
-            echo "  --message           Test message to send (default: 'Объясни что такое нейронная сеть простыми словами')"
+            echo "  -m, --message       Test message to send (default: 'Объясни что такое нейронная сеть простыми словами')"
             echo "  --type              API type to test: chat, responses, both (default: both)"
             echo "  --max-tokens        Maximum tokens to generate (default: 1000 or \$OPENAI_API_MAX_TOKENS)"
             echo "                      Use -1 to omit max_tokens from request body"
             echo "  --responses-api-type Override Responses API type: openai, openrouter (default: auto-detect)"
             echo "                      Use this to force a specific Responses API format for custom endpoints"
+            echo "  --streaming         Enable streaming mode for chat completions API (default: false)"
             echo "  --save-log          Save request and response to JSON log file (default: false)"
             echo "  --add-headers       Add custom HTTP headers (can be used multiple times)"
             echo "                      Multiple headers in one value: use || as separator"
@@ -76,6 +82,7 @@ while [[ $# -gt 0 ]]; do
             echo "  OPENAI_BASE_URL       Base URL for API"
             echo "  OPENAI_MODEL          Model to use (default: gpt-5)"
             echo "  OPENAI_API_MAX_TOKENS Maximum tokens to generate (default: 1000)"
+            echo "  OPENAI_API_STREAMING  Enable streaming mode for chat completions (default: false)"
             echo "  RESPONSES_API_TYPE    Override Responses API type: openai, openrouter"
             echo ""
             echo "Supported APIs:"
@@ -198,6 +205,7 @@ echo "  Base URL: $BASE_URL"
 echo "  Message: $MESSAGE"
 echo "  API Type: $API_TYPE"
 echo "  Max Tokens: $MAX_TOKENS"
+echo "  Streaming: $STREAMING"
 if [[ -n "$RESPONSES_API_TYPE_OVERRIDE" ]]; then
     echo "  Responses API Type: $RESPONSES_API_TYPE_OVERRIDE (overridden)"
 fi
@@ -255,13 +263,29 @@ fi
 # Function to test Chat Completions API
 test_chat_completions() {
     echo "═══════════════════════════════════════"
-    echo "🔵 Testing Chat Completions API"
+    if [[ "$STREAMING" == "true" ]]; then
+        echo "🔵 Testing Chat Completions API (Streaming)"
+    else
+        echo "🔵 Testing Chat Completions API"
+    fi
     echo "═══════════════════════════════════════"
-    
+
     # Prepare request body
     if [[ "$MAX_TOKENS" == "-1" ]]; then
         # Don't include max_tokens if it's -1
-        request_body="{
+        if [[ "$STREAMING" == "true" ]]; then
+            request_body="{
+        \"model\": \"$MODEL\",
+        \"messages\": [
+            {
+                \"role\": \"user\",
+                \"content\": \"$MESSAGE\"
+            }
+        ],
+        \"stream\": true
+    }"
+        else
+            request_body="{
         \"model\": \"$MODEL\",
         \"messages\": [
             {
@@ -270,8 +294,22 @@ test_chat_completions() {
             }
         ]
     }"
+        fi
     else
-        request_body="{
+        if [[ "$STREAMING" == "true" ]]; then
+            request_body="{
+        \"model\": \"$MODEL\",
+        \"messages\": [
+            {
+                \"role\": \"user\",
+                \"content\": \"$MESSAGE\"
+            }
+        ],
+        \"max_tokens\": $MAX_TOKENS,
+        \"stream\": true
+    }"
+        else
+            request_body="{
         \"model\": \"$MODEL\",
         \"messages\": [
             {
@@ -281,13 +319,121 @@ test_chat_completions() {
         ],
         \"max_tokens\": $MAX_TOKENS
     }"
+        fi
     fi
     
     # Save request if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
         CHAT_REQUEST="$request_body"
     fi
-    
+
+    if [[ "$STREAMING" == "true" ]]; then
+        # Streaming mode: use curl with --no-buffer to process SSE events
+        curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\" --no-buffer"
+        curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
+        curl_cmd="$curl_cmd -H \"Authorization: Bearer $OPENAI_API_KEY\""
+        curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
+        curl_cmd="$curl_cmd -d \$'$request_body'"
+        curl_cmd="$curl_cmd \"$BASE_URL/chat/completions\""
+
+        # Variables to accumulate response
+        full_content=""
+        full_reasoning=""
+        prompt_tokens=""
+        completion_tokens=""
+        total_tokens=""
+
+        # Process streaming response
+        echo ""
+        echo "✅ Streaming response:"
+        echo ""
+
+        while IFS= read -r line; do
+            # Check for HTTP status at the end
+            if [[ "$line" == HTTP_STATUS:* ]]; then
+                http_status="${line#HTTP_STATUS:}"
+                continue
+            fi
+
+            # Skip empty lines
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+
+            # Check for SSE data lines
+            if [[ "$line" == data:* ]]; then
+                # Extract JSON after "data: "
+                json_data="${line#data: }"
+
+                # Check for [DONE] signal
+                if [[ "$json_data" == "[DONE]" ]]; then
+                    break
+                fi
+
+                # Try to parse the chunk
+                if command -v jq &> /dev/null; then
+                    # Extract content delta
+                    delta_content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty' 2>/dev/null)
+                    delta_reasoning=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning // empty' 2>/dev/null)
+
+                    # Print content as it arrives
+                    if [[ -n "$delta_content" && "$delta_content" != "null" ]]; then
+                        printf "%s" "$delta_content"
+                        full_content="${full_content}${delta_content}"
+                    fi
+
+                    # Accumulate reasoning (usually comes first)
+                    if [[ -n "$delta_reasoning" && "$delta_reasoning" != "null" ]]; then
+                        full_reasoning="${full_reasoning}${delta_reasoning}"
+                    fi
+
+                    # Try to extract usage info (usually in the last chunk)
+                    usage_prompt=$(echo "$json_data" | jq -r '.usage.prompt_tokens // empty' 2>/dev/null)
+                    usage_completion=$(echo "$json_data" | jq -r '.usage.completion_tokens // empty' 2>/dev/null)
+                    usage_total=$(echo "$json_data" | jq -r '.usage.total_tokens // empty' 2>/dev/null)
+
+                    if [[ -n "$usage_prompt" ]]; then
+                        prompt_tokens="$usage_prompt"
+                    fi
+                    if [[ -n "$usage_completion" ]]; then
+                        completion_tokens="$usage_completion"
+                    fi
+                    if [[ -n "$usage_total" ]]; then
+                        total_tokens="$usage_total"
+                    fi
+                fi
+            fi
+        done < <(eval $curl_cmd 2>&1)
+
+        echo ""
+        echo ""
+
+        # Show reasoning if present
+        if [[ -n "$full_reasoning" ]]; then
+            echo "💭 Reasoning tokens (model's thought process):"
+            echo "$full_reasoning"
+            echo ""
+        fi
+
+        # Show usage statistics if available
+        if [[ -n "$prompt_tokens" || -n "$completion_tokens" || -n "$total_tokens" ]]; then
+            echo "📊 Token Usage:"
+            echo "  Input tokens:  ${prompt_tokens:-N/A}"
+            echo "  Output tokens: ${completion_tokens:-N/A}"
+            echo "  Total tokens:  ${total_tokens:-N/A}"
+        fi
+
+        # Save streaming response if logging enabled
+        if [[ "$SAVE_LOG" == "true" ]]; then
+            CHAT_RESPONSE="{\"content\": \"$full_content\", \"reasoning\": \"$full_reasoning\"}"
+        fi
+
+        echo "HTTP Status: ${http_status:-200}"
+        echo ""
+        return 0
+    fi
+
+    # Non-streaming mode (original code)
     # Build curl command with custom headers
     curl_cmd="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\""
     curl_cmd="$curl_cmd -H \"Content-Type: application/json\""
@@ -295,12 +441,12 @@ test_chat_completions() {
     curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
     curl_cmd="$curl_cmd -d \$'$request_body'"
     curl_cmd="$curl_cmd \"$BASE_URL/chat/completions\""
-    
+
     response=$(eval $curl_cmd 2>&1)
-    
+
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
-    
+
     # Save response if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
         # Minify JSON to single line to avoid line breaks in log file
@@ -316,7 +462,7 @@ test_chat_completions() {
             CHAT_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
         fi
     fi
-    
+
     echo "HTTP Status: $http_status"
     
     # Check if we got a valid HTTP status
