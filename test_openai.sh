@@ -224,8 +224,10 @@ echo ""
 # Initialize log data storage
 CHAT_REQUEST=""
 CHAT_RESPONSE=""
+CHAT_RESPONSE_TIME=""
 RESPONSES_REQUEST=""
 RESPONSES_RESPONSE=""
+RESPONSES_RESPONSE_TIME=""
 
 # Determine which Responses API format to use
 # OpenRouter has its own /responses endpoint (simpler format)
@@ -348,6 +350,9 @@ test_chat_completions() {
         echo "✅ Streaming response:"
         echo ""
 
+        # Measure streaming time
+        stream_start_time=$(date +%s%N 2>/dev/null || date +%s)
+
         while IFS= read -r line; do
             # Check for HTTP status at the end
             if [[ "$line" == HTTP_STATUS:* ]]; then
@@ -405,6 +410,22 @@ test_chat_completions() {
             fi
         done < <(eval $curl_cmd 2>&1)
 
+        # Calculate streaming duration
+        stream_end_time=$(date +%s%N 2>/dev/null || date +%s)
+        if [[ "$stream_start_time" =~ ^[0-9]+$ ]]; then
+            if [[ ${#stream_start_time} -gt 10 ]]; then
+                # Nanoseconds available
+                stream_duration_ns=$((stream_end_time - stream_start_time))
+                stream_duration_ms=$((stream_duration_ns / 1000000))
+                stream_duration_s=$(echo "scale=3; $stream_duration_ns / 1000000000" | bc 2>/dev/null || echo "0")
+                CHAT_RESPONSE_TIME="${stream_duration_s}s"
+            else
+                # Only seconds available
+                stream_duration_s=$((stream_end_time - stream_start_time))
+                CHAT_RESPONSE_TIME="${stream_duration_s}s"
+            fi
+        fi
+
         echo ""
         echo ""
 
@@ -428,7 +449,16 @@ test_chat_completions() {
             CHAT_RESPONSE="{\"content\": \"$full_content\", \"reasoning\": \"$full_reasoning\"}"
         fi
 
-        echo "HTTP Status: ${http_status:-200}"
+        # Display HTTP status with timing
+        if [[ -n "$CHAT_RESPONSE_TIME" ]]; then
+            if [[ ${#stream_start_time} -gt 10 ]]; then
+                echo "HTTP Status: ${http_status:-200} | ⏱️  Time: ${stream_duration_s}s (${stream_duration_ms}ms)"
+            else
+                echo "HTTP Status: ${http_status:-200} | ⏱️  Time: ${CHAT_RESPONSE_TIME}"
+            fi
+        else
+            echo "HTTP Status: ${http_status:-200}"
+        fi
         echo ""
         return 0
     fi
@@ -442,10 +472,28 @@ test_chat_completions() {
     curl_cmd="$curl_cmd -d \$'$request_body'"
     curl_cmd="$curl_cmd \"$BASE_URL/chat/completions\""
 
+    # Measure request time
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
     response=$(eval $curl_cmd 2>&1)
+    end_time=$(date +%s%N 2>/dev/null || date +%s)
 
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
+
+    # Calculate request duration
+    if [[ "$start_time" =~ ^[0-9]+$ ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            # Nanoseconds available
+            duration_ns=$((end_time - start_time))
+            duration_ms=$((duration_ns / 1000000))
+            duration_s=$(echo "scale=3; $duration_ns / 1000000000" | bc 2>/dev/null || echo "0")
+            CHAT_RESPONSE_TIME="${duration_s}s"
+        else
+            # Only seconds available
+            duration_s=$((end_time - start_time))
+            CHAT_RESPONSE_TIME="${duration_s}s"
+        fi
+    fi
 
     # Save response if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
@@ -463,8 +511,17 @@ test_chat_completions() {
         fi
     fi
 
-    echo "HTTP Status: $http_status"
-    
+    # Display HTTP status with timing
+    if [[ -n "$CHAT_RESPONSE_TIME" ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            echo "HTTP Status: $http_status | ⏱️  Time: ${duration_s}s (${duration_ms}ms)"
+        else
+            echo "HTTP Status: $http_status | ⏱️  Time: ${CHAT_RESPONSE_TIME}"
+        fi
+    else
+        echo "HTTP Status: $http_status"
+    fi
+
     # Check if we got a valid HTTP status
     if [[ -z "$http_status" || "$http_status" == "000" ]]; then
         echo ""
@@ -550,11 +607,29 @@ test_openrouter_responses_api() {
     curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
     curl_cmd="$curl_cmd -d \$'$request_body'"
     curl_cmd="$curl_cmd \"$BASE_URL/responses\""
-    
+
+    # Measure request time
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
     response=$(eval $curl_cmd 2>&1)
-    
+    end_time=$(date +%s%N 2>/dev/null || date +%s)
+
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
+
+    # Calculate request duration
+    if [[ "$start_time" =~ ^[0-9]+$ ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            # Nanoseconds available
+            duration_ns=$((end_time - start_time))
+            duration_ms=$((duration_ns / 1000000))
+            duration_s=$(echo "scale=3; $duration_ns / 1000000000" | bc 2>/dev/null || echo "0")
+            RESPONSES_RESPONSE_TIME="${duration_s}s"
+        else
+            # Only seconds available
+            duration_s=$((end_time - start_time))
+            RESPONSES_RESPONSE_TIME="${duration_s}s"
+        fi
+    fi
     
     # Save response if logging enabled
     if [[ "$SAVE_LOG" == "true" ]]; then
@@ -571,9 +646,18 @@ test_openrouter_responses_api() {
             RESPONSES_RESPONSE=$(printf '%s' "$response_body" | tr '\n' ' ' | tr '\r' ' ')
         fi
     fi
-    
-    echo "HTTP Status: $http_status"
-    
+
+    # Display HTTP status with timing
+    if [[ -n "$RESPONSES_RESPONSE_TIME" ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            echo "HTTP Status: $http_status | ⏱️  Time: ${duration_s}s (${duration_ms}ms)"
+        else
+            echo "HTTP Status: $http_status | ⏱️  Time: ${RESPONSES_RESPONSE_TIME}"
+        fi
+    else
+        echo "HTTP Status: $http_status"
+    fi
+
     # Check if we got a valid HTTP status
     if [[ -z "$http_status" || "$http_status" == "000" ]]; then
         echo ""
@@ -670,9 +754,12 @@ test_openai_responses_api() {
     curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
     curl_cmd="$curl_cmd -d \$'$session_request'"
     curl_cmd="$curl_cmd \"$BASE_URL/sessions\""
-    
+
+    # Measure session creation time
+    session_start_time=$(date +%s%N 2>/dev/null || date +%s)
     session_response=$(eval $curl_cmd 2>&1)
-    
+    session_end_time=$(date +%s%N 2>/dev/null || date +%s)
+
     session_http_status=$(echo "$session_response" | grep "HTTP_STATUS:" | cut -d: -f2)
     session_body=$(echo "$session_response" | sed '/HTTP_STATUS:/d')
     
@@ -704,8 +791,23 @@ test_openai_responses_api() {
         echo ""
         return 1
     fi
-    
-    echo "✅ Session created: $SESSION_ID"
+
+    # Calculate session creation duration
+    if [[ "$session_start_time" =~ ^[0-9]+$ ]]; then
+        if [[ ${#session_start_time} -gt 10 ]]; then
+            # Nanoseconds available
+            session_duration_ns=$((session_end_time - session_start_time))
+            session_duration_ms=$((session_duration_ns / 1000000))
+            session_duration_s=$(echo "scale=3; $session_duration_ns / 1000000000" | bc 2>/dev/null || echo "0")
+            echo "✅ Session created: $SESSION_ID | ⏱️  Time: ${session_duration_s}s (${session_duration_ms}ms)"
+        else
+            # Only seconds available
+            session_duration_s=$((session_end_time - session_start_time))
+            echo "✅ Session created: $SESSION_ID | ⏱️  Time: ${session_duration_s}s"
+        fi
+    else
+        echo "✅ Session created: $SESSION_ID"
+    fi
     echo ""
     
     # Step 2: Create a response
@@ -737,14 +839,41 @@ test_openai_responses_api() {
     curl_cmd="$curl_cmd $CURL_CUSTOM_HEADERS"
     curl_cmd="$curl_cmd -d \$'$response_request'"
     curl_cmd="$curl_cmd \"$BASE_URL/sessions/$SESSION_ID/responses\""
-    
+
+    # Measure response creation time
+    start_time=$(date +%s%N 2>/dev/null || date +%s)
     response=$(eval $curl_cmd 2>&1)
-    
+    end_time=$(date +%s%N 2>/dev/null || date +%s)
+
     http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
     response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
-    
-    echo "HTTP Status: $http_status"
-    
+
+    # Calculate response creation duration
+    if [[ "$start_time" =~ ^[0-9]+$ ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            # Nanoseconds available
+            duration_ns=$((end_time - start_time))
+            duration_ms=$((duration_ns / 1000000))
+            duration_s=$(echo "scale=3; $duration_ns / 1000000000" | bc 2>/dev/null || echo "0")
+            RESPONSES_RESPONSE_TIME="${duration_s}s"
+        else
+            # Only seconds available
+            duration_s=$((end_time - start_time))
+            RESPONSES_RESPONSE_TIME="${duration_s}s"
+        fi
+    fi
+
+    # Display HTTP status with timing
+    if [[ -n "$RESPONSES_RESPONSE_TIME" ]]; then
+        if [[ ${#start_time} -gt 10 ]]; then
+            echo "HTTP Status: $http_status | ⏱️  Time: ${duration_s}s (${duration_ms}ms)"
+        else
+            echo "HTTP Status: $http_status | ⏱️  Time: ${RESPONSES_RESPONSE_TIME}"
+        fi
+    else
+        echo "HTTP Status: $http_status"
+    fi
+
     # Check if we got a valid HTTP status
     if [[ -z "$http_status" || "$http_status" == "000" ]]; then
         echo ""
@@ -884,7 +1013,8 @@ if [[ "$SAVE_LOG" == "true" ]]; then
     \"max_tokens\": $MAX_TOKENS_JSON,
     \"responses_api_type\": $RESPONSES_API_TYPE_JSON,
     \"message\": \"$MESSAGE_ESCAPED\",
-    \"custom_headers\": $CUSTOM_HEADERS_JSON
+    \"custom_headers\": $CUSTOM_HEADERS_JSON,
+    \"streaming\": $([[ "$STREAMING" == "true" ]] && echo "true" || echo "false")
   }"
     
     # Add comma if any API was executed
@@ -897,7 +1027,8 @@ if [[ "$SAVE_LOG" == "true" ]]; then
         log_json="$log_json
   \"chat_completions_api\": {
     \"request\": $CHAT_REQUEST,
-    \"response\": $CHAT_RESPONSE
+    \"response\": $CHAT_RESPONSE,
+    \"response_time\": \"${CHAT_RESPONSE_TIME:-N/A}\"
   }"
     fi
     
@@ -911,7 +1042,8 @@ if [[ "$SAVE_LOG" == "true" ]]; then
         log_json="$log_json
   \"responses_api\": {
     \"request\": $RESPONSES_REQUEST,
-    \"response\": $RESPONSES_RESPONSE
+    \"response\": $RESPONSES_RESPONSE,
+    \"response_time\": \"${RESPONSES_RESPONSE_TIME:-N/A}\"
   }"
     fi
     
